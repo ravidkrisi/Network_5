@@ -1,51 +1,15 @@
-#include<stdio.h>	//For standard things
-#include<stdlib.h>	//malloc
-#include<string.h>	//memset
-#include<netinet/ip_icmp.h>	//Provides declarations for icmp header
-#include<netinet/udp.h>	//Provides declarations for udp header
-#include<netinet/tcp.h>	//Provides declarations for tcp header
-#include<netinet/ip.h>	//Provides declarations for ip header
-#include<sys/socket.h>
-#include<arpa/inet.h>
-#include <net/ethernet.h>
-#include <linux/if_packet.h>
+#include "interface.h"
 
-#define BUFFERSIZE 512
-
- void packetHandler(unsigned char* buffer, int length, FILE *file);
- void print_ip_header(unsigned char *buffer, int length, FILE *file);
- void print_tcp_packet(unsigned char *buffer, int length, FILE *file);
+FILE *file;
 
 
-
-int main ()
+int main()
 {
-    //set variables 
-    int raw_sock;
-    char buffer [BUFFERSIZE];
-    struct sockaddr source;
-    struct packet_mreq mr;
-    int source_size;
-    FILE *file;
-
-
-    //zeroing the source 
-    source_size = sizeof(source);
-    memset(&source, 0, source_size); 
-    
-
-    //create raw socket to sniff 
-    raw_sock = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
-    if(raw_sock<0)
-    {
-        printf("error in creating socket\n");
-        return 1;
-    }
-    printf("[+]created raw socket\n");
-
-    //turn on the promiscuous mode
-    mr.mr_type = PACKET_MR_PROMISC;
-    setsockopt(raw_sock, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mr, sizeof(mr));
+    char errbuf[PCAP_ERRBUF_SIZE];
+    struct bpf_program fp;
+    char filter_exp[] = "tcp";
+    bpf_u_int32 net;
+ 
 
     //create the log file
     file = fopen("log.txt", "w");
@@ -56,76 +20,91 @@ int main ()
     }
     printf("[+]created log file\n");
 
-    //sniffing packets 
-    printf("[+]sniffing packets\n");
-    while(1)
+    //open live pcap session on NIC with the name eth3
+    pcap_t *handle = pcap_open_live("lo", BUFSIZ, 1, 1000, errbuf);
+    if(handle == NULL)
     {
-        int data_size = recvfrom(raw_sock, buffer, BUFFERSIZE, 0, &source, (socklen_t*)&source_size);
-        if(data_size<0)
-        {
-            printf("failed to get packets\n");
-            return 1;
-        }
-        packetHandler(buffer, data_size, file);
+        printf("couldnt open device\n");
+        printf("%s\n", errbuf);
     }
+
+    //set the filter on the pcap sniffer
+    pcap_compile(handle, &fp, filter_exp, 0, net);
+    pcap_setfilter(handle, &fp);
+
+    //capture packets 
+    pcap_loop(handle, -1, got_packet, NULL);
+
+    //close the handle
+    pcap_close(handle);
 
     return 0;
 }
 
- void packetHandler(unsigned char* buffer, int size, FILE *file)
+void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet)
 {
-    //get the IP header of the packet
-    struct iphdr *iph = (struct iphdr*)(buffer+sizeof(struct ethhdr));
+   //get iphdr of packer
+    struct iphdr *ip = (struct iphdr*)(packet+sizeof(struct ether_header));
+    //get the tcp header
+    struct tcphdr *tcp = (struct tcphdr*)(packet+sizeof(struct ether_header)+ sizeof(struct iphdr));
+    //get the app header
+    struct apphdr *app = (struct apphdr*)(packet+sizeof(struct ether_header)+ sizeof(struct iphdr)+sizeof(struct tcphdr));
+    //get the data pointer
+    char *data =(char*)(packet+sizeof(struct ether_header)+ sizeof(struct iphdr)+sizeof(struct tcphdr)+sizeof(struct apphdr));
+    
+   
+    static int packet_num = 0; 
+    //write the number of packet
+    packet_num ++;
+    fprintf(file, "------packet #%d------\n", packet_num);
 
-    switch(iph->protocol)
-    {
-        case IPPROTO_TCP:
-            printf("TCP\n");
-            print_tcp_packet(buffer, size, file);
-            return;
-        
-        case IPPROTO_UDP:
-            printf("UDP\n");
-            return;
-
-        case IPPROTO_ICMP:
-            printf("ICMP\n");
-            return;
-
-        default:
-            printf("others\n");
-            return;
-    }
-}
-
-void print_tcp_packet(unsigned char *buffer, int length, FILE *file)
-{
-    print_ip_header(buffer, length, file);
-    //get the iphdr of the packet
-    struct iphdr *iph = (struct iphdr*)(buffer+sizeof(struct ethhdr));
-
-    //get the tcphdr of the packet
-    struct tcphdr *tcph = (struct tcphdr*)(buffer +sizeof(struct ethhdr));
-
-    // char ip_src_str[INET_ADDRSTRLEN];
-    fprintf(file, "Source port: %u\n", ntohs(tcph->source));
-    fprintf(file, "Destination port: %u\n", ntohs(tcph->dest));
-
-}
-
-void print_ip_header(unsigned char *buffer, int length, FILE *file)
-{
-    //get the iphdr of the packet
-    struct iphdr *iph = (struct iphdr*)(buffer+sizeof(struct ethhdr));
+ 
 
     //get IP source of the packet
     char ip_src_str[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &(iph->saddr), ip_src_str, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, &(ip->saddr), ip_src_str, INET_ADDRSTRLEN);
 
     //get IP dest of the packet
     char ip_dest_str[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &(iph->daddr), ip_dest_str, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, &(ip->daddr), ip_dest_str, INET_ADDRSTRLEN);
 
     fprintf(file, "IP source: %s\n", ip_src_str);
     fprintf(file, "IP destination: %s\n", ip_dest_str);
+
+    // char ip_src_str[INET_ADDRSTRLEN];
+    fprintf(file, "Source port: %u\n", ntohs(tcp->source));
+    fprintf(file, "Destination port: %u\n", ntohs(tcp->dest));
+
+     //retrieve the status code of the packet and write to file
+    fprintf(file, "status code: %u\n", app->status);
+
+    //write size of packet to the file 
+    fprintf(file, "length: %u\n", header->caplen);
+
+    // get cache flag and write it to the file 
+    fprintf(file, "cache flag: %u\n", app->c_flags);
+
+    //get steps flag and write it to file 
+    fprintf(file, "steps flag: %u\n", app->s_flag);
+
+    //get type flag and write it to file 
+    fprintf(file, "type flag: %u\n", app->t_flag);
+
+    //get cache control and write it to the file
+    fprintf(file, "cache control: %u\n", app->cache);
+
+
+    //convert data to hex and write it to file
+    if(tcp->psh)
+    {
+ 
+         fprintf(file, "data:");
+        for (int i=0; i<header->len; i++)
+        {
+            if(!(i&15)) fprintf(file, "\n%04X: ", i);
+            fprintf(file, "%02X ", ((unsigned char*)packet)[i]);
+        }
+    }
+    fprintf(file, "\n");
 }
+
